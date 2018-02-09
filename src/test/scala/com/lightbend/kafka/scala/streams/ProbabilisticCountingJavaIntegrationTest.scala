@@ -23,14 +23,13 @@ package com.lightbend.kafka.scala.streams
 import java.util.Properties
 
 import com.lightbend.kafka.scala.server.{KafkaLocalServer, MessageListener, MessageSender, RecordProcessorTrait}
-import com.lightbend.kafka.scala.streams.ImplicitConversions._
 import com.lightbend.kafka.scala.streams.algebird.{CMSStore, CMSStoreBuilder}
 import minitest.TestSuite
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.serialization._
-import org.apache.kafka.streams.kstream.{Produced, Transformer}
+import org.apache.kafka.streams.kstream.{KStream, Produced, Transformer}
 import org.apache.kafka.streams.processor.ProcessorContext
-import org.apache.kafka.streams.{KafkaStreams, KeyValue, StreamsConfig}
+import org.apache.kafka.streams.{KafkaStreams, KeyValue, StreamsBuilder, StreamsConfig}
 
 /**
   * End-to-end integration test that demonstrates how to probabilistically count items in an input stream.
@@ -38,7 +37,7 @@ import org.apache.kafka.streams.{KafkaStreams, KeyValue, StreamsConfig}
   * This example uses a custom state store implementation, [[CMSStore]], that is backed by a
   * Count-Min Sketch data structure.
   */
-trait ProbabilisticCountingScalaIntegrationTestData {
+trait ProbabilisticCountingJavaIntegrationTestData {
   val brokers = "localhost:9092"
   val inputTopic = s"inputTopic.${scala.util.Random.nextInt(100)}"
   val outputTopic = s"output-topic.${scala.util.Random.nextInt(100)}"
@@ -51,22 +50,22 @@ trait ProbabilisticCountingScalaIntegrationTestData {
   )
 
   val expectedWordCounts: Seq[KeyValue[String, Long]] = Seq(
-    ("hello", 1L),
-    ("kafka", 1L),
-    ("streams", 1L),
-    ("all", 1L),
-    ("streams", 2L),
-    ("lead", 1L),
-    ("to", 1L),
-    ("kafka", 2L),
-    ("join", 1L),
-    ("kafka", 3L),
-    ("summit", 1L)
+    new KeyValue("hello", 1L),
+    new KeyValue("kafka", 1L),
+    new KeyValue("streams", 1L),
+    new KeyValue("all", 1L),
+    new KeyValue("streams", 2L),
+    new KeyValue("lead", 1L),
+    new KeyValue("to", 1L),
+    new KeyValue("kafka", 2L),
+    new KeyValue("join", 1L),
+    new KeyValue("kafka", 3L),
+    new KeyValue("summit", 1L)
   )
 }
 
-object ProbabilisticCountingScalaIntegrationTest extends TestSuite[KafkaLocalServer]
-  with ProbabilisticCountingScalaIntegrationTestData {
+object ProbabilisticCountingJavaIntegrationTest extends TestSuite[KafkaLocalServer]
+  with ProbabilisticCountingJavaIntegrationTestData {
 
   override def setup(): KafkaLocalServer = {
     val s = KafkaLocalServer(true, Some(localStateDir))
@@ -78,7 +77,7 @@ object ProbabilisticCountingScalaIntegrationTest extends TestSuite[KafkaLocalSer
     server.stop()
   }
 
-  test("shouldProbabilisticallyCountWordsScala") { server =>
+  test("shouldProbabilisticallyCountWordsJava") { server =>
 
     server.createTopic(inputTopic)
     server.createTopic(outputTopic)
@@ -97,7 +96,7 @@ object ProbabilisticCountingScalaIntegrationTest extends TestSuite[KafkaLocalSer
       p
     }
 
-    val builder = new StreamsBuilderS()
+    val builder = new StreamsBuilder()
 
     val cmsStoreName = "cms-store"
     val cmsStoreBuilder = {
@@ -113,7 +112,7 @@ object ProbabilisticCountingScalaIntegrationTest extends TestSuite[KafkaLocalSer
     }
     builder.addStateStore(cmsStoreBuilder)
 
-    class ProbabilisticCounter extends Transformer[Array[Byte], String, (String, Long)] {
+    class ProbabilisticCounter extends Transformer[Array[Byte], String, KeyValue[String, Long]] {
 
       private var cmsState: CMSStore[String] = _
       private var processorContext: ProcessorContext = _
@@ -123,29 +122,39 @@ object ProbabilisticCountingScalaIntegrationTest extends TestSuite[KafkaLocalSer
         cmsState = this.processorContext.getStateStore(cmsStoreName).asInstanceOf[CMSStore[String]]
       }
 
-      override def transform(key: Array[Byte], value: String): (String, Long) = {
+      override def transform(key: Array[Byte], value: String): KeyValue[String, Long] = {
         // Count the record value, think: "+ 1"
         cmsState.put(value, this.processorContext.timestamp())
 
         // In this example: emit the latest count estimate for the record value.  We could also do
         // something different, e.g. periodically output the latest heavy hitters via `punctuate`.
-        (value, cmsState.get(value))
+        new KeyValue(value, cmsState.get(value))
       }
 
-      override def punctuate(l: Long): (String, Long) = null
+      override def punctuate(l: Long): KeyValue[String, Long] = null
 
       override def close(): Unit = {}
     }
 
     // Read the input from Kafka.
-    val textLines: KStreamS[Array[Byte], String] = builder.stream(inputTopic)
+    val textLines: KStream[Array[Byte], String] = builder.stream(inputTopic)
 
     val longSerde: Serde[Long] = Serdes.Long().asInstanceOf[Serde[Long]]
 
+    import collection.JavaConverters._
+
     textLines
-      .flatMapValues(value => value.toLowerCase.split("\\W+").toIterable)
+      .flatMapValues(value => value.toLowerCase.split("\\W+").toIterable.asJava)
       .transform(() => new ProbabilisticCounter, cmsStoreName)
       .to(outputTopic, Produced.`with`(Serdes.String(), longSerde))
+
+//    // Before IntelliJ SAM conversion
+//    val sam = new Thread(new Runnable {
+//      override def run(): Unit = println("Hello world")
+//    })
+//
+//    // After IntelliJ SAM conversion
+//    val sam = new Thread(() => println("Hello world"))
 
     val streams: KafkaStreams = new KafkaStreams(builder.build(), streamsConfiguration)
     streams.start()
